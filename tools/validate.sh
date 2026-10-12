@@ -64,6 +64,15 @@ run_static_checks() {
             -o "${test_dir}/test_demo_${demo}_runtime"
         "${test_dir}/test_demo_${demo}_runtime"
     done
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_sc_proto.c main/sc_proto.c -o "${test_dir}/test_sc_proto"
+    "${test_dir}/test_sc_proto"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_sc_ring.c main/sc_ring.c -o "${test_dir}/test_sc_ring"
+    "${test_dir}/test_sc_ring"
+    # Builds the firmware protocol/crypto modules against host mbedtls and checks them
+    # with a port of the Soundcore client; skipped when mbedtls or cryptography is absent.
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_sc_client_compat.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_deep_sleep_contract.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_key_wake_contract.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_check_repo.py
