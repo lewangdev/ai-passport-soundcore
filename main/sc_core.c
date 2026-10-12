@@ -49,6 +49,7 @@ static const char *TAG = "sc_core";
 // 编码帧先进消息缓冲,由写入任务落盘:LittleFS 擦块/同步可能阻塞几十毫秒,
 // 不能卡住 I2S 采集。4 KB 约可缓冲 1.5 秒(16 kbps)。
 #define FRAME_BUF_BYTES     4096
+#define BIND_CONFIRM_MS     60000   // 绑定请求后等待用户按 OK 确认的时间
 
 typedef enum {
     EV_BLE_RX,
@@ -130,12 +131,17 @@ static void refresh_usage(void)
     s_free_kb = free_kb;
 }
 
-static void toast(const char *msg)
+static void toast_for(const char *msg, int64_t ms)
 {
     lock();
     strlcpy(s_toast, msg, sizeof(s_toast));
-    s_toast_until = now_ms() + 2500;
+    s_toast_until = now_ms() + ms;
     unlock();
+}
+
+static void toast(const char *msg)
+{
+    toast_for(msg, 2500);
 }
 
 // ---------------------------------------------------------------- 持久化
@@ -598,6 +604,40 @@ static void wifi_end(const char *why)
     ble_start();
 }
 
+// ---------------------------------------------------------------- 绑定
+
+static int64_t s_bind_deadline;     // 0 = 没有待确认的绑定请求(仅 core 任务访问)
+static volatile bool s_bind_pending; // 给输入任务看的镜像
+
+static void set_bound(bool bound)
+{
+    lock();
+    s_bound = bound;
+    unlock();
+    nvs_save_u32("bound", bound);
+    sc_ble_adv_state_t adv = { .bound = bound };
+    sc_ble_set_adv_state(&adv);
+}
+
+static void bind_confirm(void)
+{
+    s_bind_deadline = 0;
+    s_bind_pending = false;
+    set_bound(true);
+    send_frame(1, SC_T_BIND, SC_ID_BIND_CONFIRM, NULL, 0);
+    toast("Paired");
+    ESP_LOGI(TAG, "绑定已确认");
+}
+
+static void bind_cancel(const char *why)
+{
+    if (!s_bind_deadline) return;
+    s_bind_deadline = 0;
+    s_bind_pending = false;
+    toast(why);
+    ESP_LOGI(TAG, "绑定未确认:%s", why);
+}
+
 // ---------------------------------------------------------------- 命令处理
 
 static void handle_cmd(const sc_cmd_t *cmd, void *ctx)
@@ -607,6 +647,9 @@ static void handle_cmd(const sc_cmd_t *cmd, void *ctx)
     size_t n;
     ESP_LOGI(TAG, "命令 %02X/%02X len=%u%s", cmd->type, cmd->id, (unsigned)cmd->payload_len,
              cmd->checksum_ok ? "" : " (校验和错误)");
+    if (cmd->payload_len && cmd->type != SC_T_ENCRYPT) {
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, cmd->payload, cmd->payload_len > 64 ? 64 : cmd->payload_len, ESP_LOG_INFO);
+    }
 
     switch (cmd->type) {
     case SC_T_DEVICE:
@@ -712,15 +755,19 @@ static void handle_cmd(const sc_cmd_t *cmd, void *ctx)
     case SC_T_BIND:
         if (cmd->id == SC_ID_BIND && cmd->payload_len >= 1) {
             bool bind = cmd->payload[0] == 1;
-            lock();
-            s_bound = bind;
-            unlock();
-            nvs_save_u32("bound", bind);
-            sc_ble_adv_state_t adv = { .bound = bind };
-            sc_ble_set_adv_state(&adv);
             send_frame(1, SC_T_BIND, SC_ID_BIND, cmd->payload, 1);
-            if (bind) send_frame(1, SC_T_BIND, SC_ID_BIND_CONFIRM, NULL, 0);
-            toast(bind ? "Bound to app" : "Unbound");
+            if (bind) {
+                // 与原机一致:应答 0x87 后等用户在设备上按键,再发 0x88 确认。
+                s_bind_deadline = now_ms() + BIND_CONFIRM_MS;
+                s_bind_pending = true;
+                toast_for("Press OK to pair", BIND_CONFIRM_MS);
+                ESP_LOGI(TAG, "绑定请求:等待按 OK 确认");
+            } else {
+                s_bind_deadline = 0;
+                s_bind_pending = false;
+                set_bound(false);
+                toast("Unbound");
+            }
         }
         break;
 
@@ -812,6 +859,11 @@ static void ble_start(void)
 static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
     if (btn != BSP_BTN_OK) return;              // 翻页键由界面处理
+    if (s_bind_deadline && (ev == BSP_BTN_CLICK || ev == BSP_BTN_LONG)) {
+        if (s_subscribed) bind_confirm();
+        else bind_cancel("Pairing cancelled");
+        return;
+    }
     if (ev == BSP_BTN_CLICK) {
         if (s_link >= SC_LINK_WIFI_PENDING) return;
         if (s_rec_status == SC_REC_RECORDING) {
@@ -850,6 +902,8 @@ static void tick(void)
             send_frame(1, SC_T_DEVICE, SC_ID_BATTERY, p, sizeof(p));
         }
     }
+
+    if (s_bind_deadline && t > s_bind_deadline) bind_cancel("Pairing timed out");
 
     static int64_t last_space;
     if (t - last_space > 5000) {
@@ -907,6 +961,7 @@ static void handle_event(const ev_t *ev)
         break;
     case EV_BLE_DISCONNECT:
         job_cancel();
+        bind_cancel("Pairing cancelled");
         lock();
         s_connected = false;
         s_subscribed = false;
@@ -1000,6 +1055,11 @@ esp_err_t sc_core_start(void)
     if (xTaskCreate(core_task, "sc_core", 6144, NULL, 5, &s_core_task) != pdPASS) return ESP_ERR_NO_MEM;
     ble_start();
     return ESP_OK;
+}
+
+bool sc_core_bind_pending(void)
+{
+    return s_bind_pending;
 }
 
 void sc_core_key(bsp_btn_t btn, bsp_btn_ev_t ev)

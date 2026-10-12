@@ -18,7 +18,6 @@ typedef struct {
 // 广播里需要的设备身份。
 typedef struct {
     bool bound;                 // 厂商数据 flags bit7
-    uint8_t color;              // 0 / 1 → flags 0x10
 } sc_ble_adv_state_t;
 
 esp_err_t sc_ble_start(const sc_ble_cbs_t *cbs, const sc_ble_adv_state_t *adv);

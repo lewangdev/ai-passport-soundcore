@@ -87,6 +87,8 @@ static void input_task(void *arg)
     for (;;) {
         if (xQueueReceive(s_input_queue, &in, pdMS_TO_TICKS(1000)) == pdTRUE) {
             process_input(&in);
+        } else if (sc_core_bind_pending()) {
+            backlight_wake();                   // 等用户按 OK 确认绑定:点亮并保持
         } else if (!s_dimmed && !sc_ui_wifi_page() &&
                    esp_timer_get_time() - s_last_input_us > BACKLIGHT_IDLE_US) {
             s_dimmed = true;

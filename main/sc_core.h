@@ -47,6 +47,8 @@ typedef struct {
 esp_err_t sc_core_start(void);
 // 输入任务调用(非按键回调上下文)。
 void sc_core_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+// App 发起绑定、等待用户按 OK 确认中(界面需保持点亮)。
+bool sc_core_bind_pending(void);
 void sc_core_snapshot(sc_snapshot_t *out);
 // 最近的录音清单(新的在前),界面用。返回条数。
 size_t sc_core_recent_files(sc_file_entry_t *out, size_t cap);

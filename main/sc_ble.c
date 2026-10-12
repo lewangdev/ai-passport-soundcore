@@ -28,6 +28,13 @@ static const ble_uuid128_t SVC_UUID = BLE_UUID128_INIT(
     0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0xda, 0xf5, 0x0c, 0x02);
 static const ble_uuid16_t WRITE_UUID = BLE_UUID16_INIT(0x7777);
 static const ble_uuid16_t NOTIFY_UUID = BLE_UUID16_INIT(0x8888);
+// 真机还暴露 OTA 服务(66666666-…/77777777-…)与 Tx Power 服务,照搬以保持服务表一致。
+static const ble_uuid128_t OTA_SVC_UUID = BLE_UUID128_INIT(
+    0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66);
+static const ble_uuid128_t OTA_CHR_UUID = BLE_UUID128_INIT(
+    0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77);
+static const ble_uuid16_t TX_POWER_SVC_UUID = BLE_UUID16_INIT(0x1804);
+static const ble_uuid16_t TX_POWER_LEVEL_UUID = BLE_UUID16_INIT(0x2A07);
 
 static sc_ble_cbs_t s_cbs;
 static sc_ble_adv_state_t s_adv;
@@ -49,7 +56,6 @@ static int gap_event(struct ble_gap_event *event, void *arg);
 static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     (void)conn;
-    (void)attr;
     (void)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         uint8_t buf[256];
@@ -61,14 +67,59 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
         return 0;
     }
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        // 通知特征也必须有 access_cb(否则整个服务注册失败);读出产品码便于调试。
-        static const char ident[] = "D3200";
-        return os_mbuf_append(ctxt->om, ident, sizeof(ident) - 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        ESP_LOGI(TAG, "读取特征 handle=%u", attr);
+        // 通知特征也必须有 access_cb(否则整个服务注册失败);真机读出单字节 0x00。
+        static const uint8_t zero = 0x00;
+        return os_mbuf_append(ctxt->om, &zero, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+static int ota_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn;
+    (void)attr;
+    (void)arg;
+    // 不支持 OTA:接受写入但丢弃(01 BB 已在命令层拒绝)。
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        ESP_LOGW(TAG, "忽略 OTA 特征写入 %u B", (unsigned)OS_MBUF_PKTLEN(ctxt->om));
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static int tx_power_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn;
+    (void)attr;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
+    ESP_LOGI(TAG, "读取 Tx Power");
+    static const int8_t level = 4;              // 与真机读数一致(dBm)
+    return os_mbuf_append(ctxt->om, &level, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 static const struct ble_gatt_svc_def GATT_SVCS[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &TX_POWER_SVC_UUID.u,
+        .characteristics = (struct ble_gatt_chr_def[]){
+            { .uuid = &TX_POWER_LEVEL_UUID.u, .access_cb = tx_power_access, .flags = BLE_GATT_CHR_F_READ },
+            { 0 },
+        },
+    },
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &OTA_SVC_UUID.u,
+        .characteristics = (struct ble_gatt_chr_def[]){
+            {
+                .uuid = &OTA_CHR_UUID.u,
+                .access_cb = ota_access,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
+            },
+            { 0 },
+        },
+    },
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &SVC_UUID.u,
@@ -109,13 +160,14 @@ void sc_ble_mac(uint8_t mac[6])
 static int advertise(void)
 {
     // 主广播:flags + 32 位服务 UUID(0x020CF5DA = D3200)+ 厂商数据。
-    // 厂商数据(含 company id 两字节)整体 14 字节:
-    //   [0..5] MAC  [6] flags(bit7 已绑定,0x70 颜色,0x0F 通道)  [7] 保留  [8..13] "soundc"
-    uint8_t mfg[14];
+    // 厂商数据(含 company id 两字节)整体 8 字节,与真机抓包一致:
+    //   [0..5] MAC  [6] flags(bit7 已绑定,0x70 颜色,0x0F 通道)  [7] 保留
+    // 真机抓包(绑定在飞书):flags 0x91(颜色 1、通道 1),不带 "soundc" 标记。
+    // 通道 1 时 soundcore App 搜不到设备,推测通道表示所属生态,这里用通道 0。
+    uint8_t mfg[8];
     memcpy(mfg, s_mac, 6);
-    mfg[6] = (uint8_t)((s_adv.bound ? 0x80 : 0x00) | (s_adv.color ? 0x10 : 0x00));
+    mfg[6] = (uint8_t)((s_adv.bound ? 0x80 : 0x00) | 0x10);
     mfg[7] = 0x00;
-    memcpy(mfg + 8, "soundc", 6);
 
     static ble_uuid32_t uuid32 = BLE_UUID32_INIT(D3200_SERVICE_UUID32);
     struct ble_hs_adv_fields fields = { 0 };
@@ -192,6 +244,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         restart_adv();
         break;
     case BLE_GAP_EVENT_SUBSCRIBE:
+        ESP_LOGI(TAG, "订阅变化 handle=%u notify=%u", event->subscribe.attr_handle, event->subscribe.cur_notify);
         if (event->subscribe.attr_handle == s_notify_handle) {
             s_subscribed = event->subscribe.cur_notify != 0;
             ESP_LOGI(TAG, "通知%s", s_subscribed ? "已订阅" : "已取消");
@@ -221,6 +274,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         restart_adv();
         break;
     default:
+        ESP_LOGI(TAG, "GAP 事件 %d", event->type);  // 排查官方 App:配对/加密等未处理事件
         break;
     }
     return 0;

@@ -16,9 +16,12 @@ Wi‑Fi bulk export, binding and factory reset.
 ## What it does
 
 - **Advertises as a D3200**: 32-bit service UUID `0x020CF5DA`
-  (`020cf5da-0000-1000-8000-00805f9b34fb`), manufacturer data carrying the MAC,
-  the bound flag and the `soundc` mark, and the name `soundcore Work`.
-- **GATT**: write characteristic `0x7777`, notify characteristic `0x8888`. Every
+  (`020cf5da-0000-1000-8000-00805f9b34fb`), 8 bytes of manufacturer data laid out
+  like a captured real device (MAC, then flags with the bound bit and color 1), and
+  the name `soundcore Work`.
+- **GATT**: write characteristic `0x7777`, notify characteristic `0x8888`, plus the
+  real device's OTA service (`66666666-…`, writes are discarded) and Tx Power
+  service. Every
   command uses the `08 EE …` frame and every reply the `09 FF …` frame with the
   additive checksum; replies are split into MTU-sized notifications.
 - **Records with its own microphone**: 16 kHz mono Opus in 20 ms SILK frames
@@ -53,7 +56,7 @@ Wi‑Fi bulk export, binding and factory reset.
 | `1A 10` delete | Deletes a finished recording |
 | `1A 0F` / `1A 11` | Acknowledged (no classic Bluetooth; data always goes over BLE) |
 | `1A 05` / `1A 02` | Wi‑Fi SoftAP export / close (a paused recording is saved first, since the app has no stop command) |
-| `0B 87` bind / unbind | Persists the bound flag (also in the advertisement); bind is confirmed with `0B 88` |
+| `0B 87` bind / unbind | Bind waits up to 60 s for an OK press on the device, then persists the bound flag (also in the advertisement) and sends `0B 88`; unbind is immediate |
 | `10 A2` find my | Stored and acknowledged |
 | `2E 01` encryption | ECDH handshake as described above |
 
@@ -73,7 +76,7 @@ reports none).
 
 | Key | Action |
 | --- | --- |
-| OK click | Start, pause, or resume recording |
+| OK click | Start, pause, or resume recording; while "Press OK to pair" is shown, confirm the bind |
 | OK long press | Stop and save the recording; during Wi‑Fi export, close the hotspot |
 | UP / DOWN click | Recorder → Recordings → Device pages |
 
@@ -125,8 +128,14 @@ in the [flashing and data policy](docs/development/engineering/firmware-layout.m
   gaps (every frame decrypts to a SILK-WB Opus packet), offline download, the file
   list, power-loss recovery of an open recording, and the `1A 05` reply with the
   switch to SoftAP and back to BLE after the join timeout.
-- **Not yet verified**: the Soundcore app on a phone, a Wi‑Fi export with a joined
+- On an iPhone with Soundcore Manager: connect, device info, time sync, file list,
+  offline downloads, the bind prompt on the screen, and the `1A 05` request that
+  switches the device to SoftAP.
+- **Not yet verified**: the bind confirmation end to end, a Wi‑Fi export with a joined
   client (TLS handshake and transfer), and microphone audio quality by ear.
+- **Not supported**: the official soundcore app. It finds and connects to the device
+  but never subscribes or sends a command, then disconnects; what it checks is not
+  documented.
 
 Measured on the device: about 24 KB of free internal heap with BLE running (20 KB
 lowest during streaming), and about 3 KB of spare stack in the Opus task. With 1M
