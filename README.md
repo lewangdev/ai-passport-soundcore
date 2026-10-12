@@ -7,7 +7,7 @@
 This firmware turns a FoloToy AI Passport into an emulated **soundcore Work**
 (Anker AI voice recorder, product code **D3200**). A phone app written for the
 real recorder — such as [Soundcore Manager](https://github.com/tacshi/Soundcore),
-whose reverse-engineered protocol notes are the specification for this work —
+an open-source project whose published soundcore protocol notes this work follows —
 discovers the AI Passport over Bluetooth LE, connects, and uses it like the
 original device: device information, clock sync, encrypted sessions, start and
 pause recording, live audio streaming for transcription, offline file download,

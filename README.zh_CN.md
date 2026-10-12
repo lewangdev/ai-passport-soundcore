@@ -5,8 +5,8 @@
 # 用 AI Passport 模拟 soundcore Work(安克 AI 录音豆 D3200)
 
 本固件把 FoloToy AI Passport 模拟成一颗 **soundcore Work**(安克 AI 录音豆,产品码
-**D3200**)。为真机编写的手机 App——例如 [Soundcore Manager](https://github.com/tacshi/Soundcore),
-其逆向协议文档就是本项目的规格——可以通过 BLE 发现并连接 AI Passport,像使用原机一样:
+**D3200**)。为真机编写的手机 App——例如开源项目 [Soundcore Manager](https://github.com/tacshi/Soundcore),
+本项目参考了它公开的 soundcore 协议文档——可以通过 BLE 发现并连接 AI Passport,像使用原机一样:
 读取设备信息、同步时钟、建立加密会话、开始/暂停录音、实时音频流转写、离线下载文件、
 Wi‑Fi 批量导出、绑定与恢复出厂。
 
